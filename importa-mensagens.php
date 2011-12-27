@@ -89,12 +89,90 @@ function main () {
     if (! imap_close ($imapconn, CL_EXPUNGE)) {
         morre ("#E010 - Impossivel fechar conexao IMAP com o servidor - " . $imap_last_error ());
     }
+    
+    exibe ("\nExtraindo mensagens ja existentes no Thunderbird...\n");
+
+    // Obter as mensagens guardadas na estrutura de pastas do Thunderbird (arquivos no formato MailBox)
+    $thunderbird_dir = dirname (__FILE__) . '/ThunderbirdPortable/Data/profile/Mail/Local Folders';
+    $local_rootdir = dirname (__FILE__) . '/local-storage';
+    $fila[] = array ($thunderbird_dir, $local_rootdir);
+    while (($pasta = array_shift ($fila)) !== null) {
+        $thund = $pasta[0];
+        $locald = $pasta[1];
+        $dd = opendir ($thund);
+        if (! $dd) {
+            morre ("#E011 - Impossivel abrir pasta '" . $pasta . "'!");
+        }
+        while (($d_entry = readdir ($dd)) !== false) {
+            if ($d_entry != '.' && $d_entry != '..') {
+                $fpath = $thund . '/' . $d_entry;
+                if (is_dir ($fpath)) {
+                    if (strtolower (substr ($d_entry, -4)) != '.sbd') {
+                        morre ("#E012 - Sintaxe de subpasta invalida: '" . $fpath . "'");
+                    }
+                    $fila[] = array ($fpath, $locald . '/' . substr ($d_entry, 0, strlen ($d_entry) - 4));
+                } else if (is_file ($fpath)) {
+                    $pos = strpos ($d_entry, '.');
+                    if ($pos === false) {
+                        exibe ("Abrindo '" . $fpath . "'...\n");
+                        $filedir = $locald . '/' . $d_entry;
+                        if (! is_dir ($filedir)) {
+                            if (! mkdir ($filedir, 0755, true)) {
+                                morre ("#E013 - Impossivel criar pasta local '" . $filedir . "'!");
+                            }
+                        }
+                        // Estou com problema para tratar casos onde o sistema de arquivos eh sensivel a maiusculas e minusculas e
+                        // casos onde o sistema de arquivos eh insensivel. Por isso, vou reler a pasta e os arquivos...
+                        // Menos desempenho, mais confiabilidade...
+                        $jabaixou = array ();
+                        $dd2 = opendir ($filedir);
+                        if (! $dd2) {
+                            morre ("#E015 - Impossivel abrir pasta '" . $filedir . "'!");
+                        }
+                        while (($d2_entry = readdir ($dd2)) !== false) {
+                            if ($d2_entry != '.' && $d2_entry != '..' && strtolower (substr ($d2_entry, -4)) == '.eml') {
+                                $f2path = $filedir . '/' . $d2_entry;
+                                if (is_file ($f2path)) {
+                                    $msgid = obtem_message_id ($f2path);
+                                    if ($msgid !== false) {
+                                        if (array_key_exists ($msgid, $jabaixou)) {
+                                            morre ("#E016 - Neste bloco de codigo, nao deveriam ser encontradas mensagens duplicadas!");
+                                        }
+                                        $jabaixou[$msgid] = $f2path;
+                                        exibe (',');
+                                    }
+                                }
+                            }
+                        }
+                        closedir ($dd2);
+                        clearstatcache (true);
+                        // Agora, ler o arquivo 'MailBox'...
+                        $fd = fopen ($fpath, "rb");
+                        if (! $fd) {
+                            morre ("#E017 - Impossivel abrir arquivo '" . $fpath . "' para leitura!");
+                        }
+                        # CONTINUAR DAQUI!
+                        fclose ($fd);
+                    } else {
+                        $ext = strtolower (substr ($d_entry, $pos));
+                        if ($ext != '.msf') {
+                            morre ("#E014 - Encontrado arquivo estranho na pasta de mensagens do Thunderbird: '" . $fpath . "'!");
+                        }
+                    }
+                }
+            }
+        }
+        closedir ($dd);
+        clearstatcache (true);
+    }
+    
+    // Remontar os arquivos MailBox e destruir os arquivos '*.msf'
 }
 
 function importa_pasta ($imapconn, $imapserver, $folder) {
     exibe ("Explorando pasta '" . $folder . "'...");
 
-    $rootdir = dirname (__FILE__) . '/' . str_replace ('.', '/', $folder);
+    $rootdir = dirname (__FILE__) . '/local-storage/' . str_replace ('.', '/', $folder);
     if (! is_dir ($rootdir)) {
         if (! mkdir ($rootdir, 0755, true)) {
             morre ("#E004 - Impossivel criar pasta local '" . $rootdir . "'!");
@@ -107,45 +185,25 @@ function importa_pasta ($imapconn, $imapserver, $folder) {
         morre ("#E009 - Impossivel abrir pasta '" . $rootdir . "'!");
     }
     while (($d_entry = readdir ($dd)) !== false) {
-        if ($d_entry != '.' && $d_entry != '..') {
+        if ($d_entry != '.' && $d_entry != '..' && strtolower (substr ($d_entry, -4)) == '.eml') {
             $fpath = $rootdir . '/' . $d_entry;
             if (is_file ($fpath)) {
-                $arqu = fopen ($fpath, "rb");
-                if ($arqu !== false) {
-                    $conteudo = "";
-                    while (! feof ($arqu)) {
-                        $parte = fread ($arqu, 1024);
-                        if ($parte !== false) {
-                            $pos = strpos ($parte, "\r\n\r\n");
-                            if ($pos === false) {
-                                $conteudo .= $parte;
-                            } else {
-                                $conteudo .= substr ($parte, 0, $pos);
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    fclose ($arqu);
-                    $objcabec = imap_rfc822_parse_headers ($conteudo);
-                    if (is_object ($objcabec)) {
-                        if (empty ($objcabec->message_id)) {
-                            aviso ("#A003 - Impossivel determinar 'Message-ID' da mensagem constante no arquivo '" . $fpath . "'!");
-                        } else {
-                            $jabaixou[] = $objcabec->message_id;
-                            exibe ('|');
-                        }
+                $msgid = obtem_message_id ($fpath);
+                if ($msgid !== false) {
+                    if (in_array ($msgid, $jabaixou)) {
+                        // Mensagem duplicada na pasta ???
+                        unlink ($fpath);
+                        exibe ("'");
                     } else {
-                        aviso ("#A002 - Impossivel analisar cabecalhos do arquivo '" . $fpath . "'!");
+                        $jabaixou[] = $msgid;
+                        exibe ('|');
                     }
-                } else {
-                    aviso ("#A001 - Impossivel abrir arquivo '" . $fpath . "'!");
                 }
             }
         }
     }
     closedir ($dd);
+    clearstatcache (true);
     
     if (! imap_reopen ($imapconn, $imapserver . $folder, OP_READONLY)) {
         morre ("#E004 - Impossivel abrir pasta '" . $folder . "': " . imap_last_error ());
@@ -155,7 +213,6 @@ function importa_pasta ($imapconn, $imapserver, $folder) {
     if (is_array ($maillist)) {
         $conta_importados = 0;
         $conta_repetidos = 0;
-
         foreach ($maillist as $mailitem) {
             // Observar cabecalhos da mensagem...
             $cabec = imap_fetchheader ($imapconn, $mailitem, FT_UID);
@@ -169,41 +226,20 @@ function importa_pasta ($imapconn, $imapserver, $folder) {
             if (empty ($objcabec->message_id)) {
                 morre ("#E008 - Impossivel determinar 'Message-ID' da mensagem #" . $mailitem . " da pasta '" . $folder . "'!");
             }
+            $faz_remocao = false;
             // A mensagem eh repetida?
             if (in_array ($objcabec->message_id, $jabaixou)) {
                 exibe ('-');
                 $conta_repetidos++;
-                // Apagar a mensagem do servidor, desde que nao se esteja explorando a pasta 'Acesso'...
-                if (strpos ($folder, '.Acesso.') === false && substr ($folder, -7) != '.Acesso') {
-                    // imap_delete ($imapconn, $mailitem, FT_UID);
-                }
+                $faz_remocao = true;
             } else {
                 // Senao, observar o corpo...
                 $corpo = imap_body ($imapconn, $mailitem, FT_UID | FT_PEEK);
                 if (empty ($corpo) && $corpo !== '') {
                     morre ("#E006 - Impossivel ler o corpo da mensagem #" . $mailitem . " da pasta '" . $folder . "': " . imap_last_error ());
                 }
-                // Definir um nome de arquivo para a mensagem, pelo assunto
-                $nomearquivo = '';
-                $subj = imap_mime_header_decode ($objcabec->subject);
-                if (is_array ($subj)) {
-                    foreach ($subj as $item) {
-                        $nomearquivo .= ' ' . $item->text;
-                    }
-                } else {
-                    aviso ("#A004 - Impossivel decodificar assunto da mensagem #" . $mailitem . " da pasta '" . $folder . "'!");
-                }
-                $nomearquivo = trim (preg_replace ("/[^\\w]+/", ' ', $nomearquivo));
-                if (empty ($nomearquivo)) {
-                    $nomearquivo = 'msg ' . $mailitem;
-                }
-                $ext = '.eml';
-                $fpath = $rootdir . '/' . $nomearquivo . $ext;
-                $i = 1;
-                while (file_exists ($fpath)) {
-                    $i++;
-                    $fpath = $rootdir . '/' . $nomearquivo . '[' . $i . ']' . $ext;
-                }
+                $fname = escolhe_nome_arquivo ($cabec, $rootdir);
+                $fpath = $rootdir . '/' . $fname;
                 $todamensagem = $cabec . $corpo;
                 $bytes = file_put_contents ($fpath, $todamensagem);
                 if ($bytes === false) {
@@ -217,10 +253,14 @@ function importa_pasta ($imapconn, $imapserver, $folder) {
                     if (! ($conta_importados % 20)) {
                         exibe ('^');
                     }
-                    // Apagar a mensagem do servidor, desde que nao se esteja explorando a pasta 'Acesso'...
-                    if (strpos ($folder, '.Acesso.') === false && substr ($folder, -7) != '.Acesso') {
-                        // imap_delete ($imapconn, $mailitem, FT_UID);
-                    }
+                    $faz_remocao = true;
+                }
+            }
+            if ($faz_remocao) {
+                // Apagar a mensagem do servidor, desde que nao se esteja explorando a pasta 'Acesso' ou alguma das pastas 'atd - *'...
+                // CUIDADO: "Atd" tambem nao pode ser apagado!
+                if (strpos ($folder, '.Acesso.') === false && substr ($folder, -7) != '.Acesso' && strpos ($folder, '.atd - ') === false) {
+                    // imap_delete ($imapconn, $mailitem, FT_UID);
                 }
             }
         }
@@ -229,6 +269,89 @@ function importa_pasta ($imapconn, $imapserver, $folder) {
     } else {
         exibe (" Nada para importar.\n");
     }
+}
+
+function obtem_message_id ($fpath) {
+    $arqu = fopen ($fpath, "rb");
+    if ($arqu !== false) {
+        $conteudo = "";
+        if (! feof ($arqu)) {
+            $blksz = 1024;
+            $parte = fread ($arqu, $blksz);
+            if ($parte !== false) {
+                $conteudo = $parte;
+                $pos = strpos ($parte, "\r\n\r\n");
+                if ($pos !== false) {
+                    $conteudo = substr ($parte, 0, $pos);
+                } else if (! feof ($arqu)) {
+                    $posbusc = strlen ($parte) - 3;
+                    do {
+                        $parte = fread ($arqu, $blksz);
+                        if ($parte !== false) {
+                            $conteudo .= $parte;
+                            $pos = strpos ($conteudo, "\r\n\r\n", $posbusc);
+                            $posbusc += strlen ($parte);
+                            if ($pos !== false) {
+                                $conteudo = substr ($conteudo, 0, $pos);
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    } while (! feof ($arqu));
+                }
+            }
+        }
+        fclose ($arqu);
+        $objcabec = imap_rfc822_parse_headers ($conteudo);
+        if (is_object ($objcabec)) {
+            if (empty ($objcabec->message_id)) {
+                aviso ("#A003 - Impossivel determinar 'Message-ID' da mensagem constante no arquivo '" . $fpath . "'!");
+            } else {
+                return ($objcabec->message_id);
+            }
+        } else {
+            aviso ("#A002 - Impossivel analisar cabecalhos do arquivo '" . $fpath . "'!");
+        }
+    } else {
+        aviso ("#A001 - Impossivel abrir arquivo '" . $fpath . "'!");
+    }
+    return (false);
+}
+
+function escolhe_nome_arquivo ($mensagem, $rootdir) {
+    // Definir um nome de arquivo para a mensagem, pelo assunto
+    $nomearquivo = '';
+    $pos = strpos ($mensagem, "\r\n\r\n");
+    if ($pos !== false) {
+        $cabec = substr ($mensagem, 0, $pos);
+    } else {
+        $cabec = $mensagem;
+    }
+    $objcabec = imap_rfc822_parse_headers ($cabec);
+    if (is_object ($objcabec)) {
+        $subj = imap_mime_header_decode ($objcabec->subject);
+        if (is_array ($subj)) {
+            foreach ($subj as $item) {
+                $nomearquivo .= ' ' . $item->text;
+            }
+        }
+        $nomearquivo = trim (preg_replace ("/[^\\w\\[\\]\\(\\)\\{\\}]+/", ' ', $nomearquivo));
+    }
+    if (empty ($nomearquivo)) {
+        $nomearquivo = 'Mensagem de e-mail';
+    }
+    $ext = '.eml';
+    $fname = $nomearquivo . $ext;
+    $fpath = $rootdir . '/' . $fname;
+    $i = 1;
+    clearstatcache (true);
+    while (file_exists ($fpath)) {
+        $i++;
+        $fname = $nomearquivo . ' [' . $i . ']' . $ext;
+        $fpath = $rootdir . '/' . $fname;
+    }
+    return ($fname);
 }
 
 //////////////////////////////////////////////////////////////////////
