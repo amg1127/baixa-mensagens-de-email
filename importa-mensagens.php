@@ -1,9 +1,18 @@
-<?php
+ <?php
 
 $line_is_blank = true;
+$logfile = __FILE__;
+if (strtolower (substr ($logfile, -4)) == '.php') {
+    $logfile = substr ($logfile, 0, strlen ($logfile) - 4) . '.log';
+} else {
+    $logfile .= '.log';
+}
+
+error_reporting (0);
+set_error_handler ('php_error_handler', -1);
 
 function exibe ($msg, $prefixo = "") {
-    global $line_is_blank;
+    global $line_is_blank, $logfile;
     $next_line_is_blank = false;
     $prefixo = trim ('[' . date ('Y-m-d H:i:s') . '] ' . $prefixo) . ' ';
     if (substr ($msg, -1) == "\n") {
@@ -19,13 +28,15 @@ function exibe ($msg, $prefixo = "") {
     }
     $line_is_blank = $next_line_is_blank;
     echo ($msgtransformada);
+    file_put_contents ($logfile, $msgtransformada, FILE_APPEND);
 }
 
 function prompt ($msg) {
-    global $line_is_blank;
+    global $line_is_blank, $logfile;
     exibe ($msg);
     $resp = trim (fgets (STDIN));
     $line_is_blank = true;
+    file_put_contents ($logfile, "\n", FILE_APPEND);
     return ($resp);
 }
 
@@ -48,6 +59,11 @@ function aviso ($msg) {
     exibe ("\n" . $msg . "\n\n", '-- AVISO --');
 }
 
+function php_error_handler ($errno, $errstr, $errfile, $errline) {
+    aviso ("Erro de PHP: '" . $errfile . "': " . $errline . ": " . $errno . ": " . $errstr . " !");
+    return (false);
+}
+
 //////////////////////////////////////////////////////////////////////
 
 function main () {
@@ -68,15 +84,17 @@ function main () {
         morre ("#E002 - Impossivel listar pastas existentes na caixa de correio IMAP - " . imap_last_error ());
     }
 
-    // Varrer cada pasta e importar mensagens
+    // Varrer cada pasta no servidor IMAP e importar mensagens
     $lenimapserver = strlen ($imapserver);
     $folder_importar = array ();
+    $outrousuario = 'user.outro-usuario.';
+    $len_outrousuario = strlen ($outrousuario);
     foreach ($folderlist as $folder) {
         if (substr ($folder, 0, $lenimapserver) != $imapserver) {
             morre ("#E003 - Sintaxe de pasta invalida: '" . $folder . "'");
         } else {
             $folder = substr ($folder, $lenimapserver);
-            if ($folder == 'user.outro-usuario' || substr ($folder, 0, 19) == 'user.outro-usuario.') {
+            if (substr ($folder . '.', 0, $len_outrousuario) == $outrousuario) {
                 $folder_importar[] = $folder;
             }
         }
@@ -114,7 +132,9 @@ function main () {
                 } else if (is_file ($fpath)) {
                     $pos = strpos ($d_entry, '.');
                     if ($pos === false) {
-                        exibe ("Abrindo '" . $fpath . "'...\n");
+                        exibe ("Abrindo '" . $fpath . "'...");
+                        $conta_importados = 0;
+                        $conta_repetidos = 0;
                         $filedir = $locald . '/' . $d_entry;
                         if (! is_dir ($filedir)) {
                             if (! mkdir ($filedir, 0755, true)) {
@@ -151,9 +171,95 @@ function main () {
                         if (! $fd) {
                             morre ("#E017 - Impossivel abrir arquivo '" . $fpath . "' para leitura!");
                         }
-                        # CONTINUAR DAQUI!
+                        $fila_leit = array ();
+                        for ($i = 0; $i < 3; $i++) {
+                            $linha = fgets ($fd);
+                            if ($linha !== false) {
+                                $fila_leit[] = $linha;
+                            } else {
+                                morre ("#E019 - EOF prematuro durante leitura do arquivo '" . $fpath . "'!");
+                            }
+                        }
+                        $cntlinha = 0;
+                        while (($linha = array_shift ($fila_leit)) !== null) {
+                            $cntlinha++;
+                            if (preg_match ("/^From - (Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|Mai|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [0-3]\\d [012]\\d:[0-5]\\d:[0-5]\\d \\d\\d\\d\\d\\s*\$/", $linha)) {
+                                $linha = bota_e_tira ($fila_leit, $cntlinha, $fd);
+                                if (preg_match ("/^X-Mozilla-Status: [a-fA-F0-9]+\\s*\$/", $linha)) {
+                                    $linha = bota_e_tira ($fila_leit, $cntlinha, $fd);
+                                    if (preg_match ("/^X-Mozilla-Status2: [a-fA-F0-9]+\\s*\$/", $linha)) {
+                                        $msg_inicio = $cntlinha - 2;
+                                        $msg_email = "";
+                                        while (1) {
+                                            $linha = bota_e_tira ($fila_leit, $cntlinha, $fd);
+                                            if ($linha === null) {
+                                                if (feof ($fd)) {
+                                                    break;
+                                                } else {
+                                                    morre ("#E021 - Erro de leitura na linha #" . $cntlinha . " do arquivo '" . $fpath . "'!");
+                                                }
+                                            } else if ($linha == "\n" || $linha == "\r" || $linha == "\r\n") {
+                                                $linha_post = bota_e_tira ($fila_leit, $cntlinha, $fd);
+                                                $cntlinha--;
+                                                if ($linha_post === null) {
+                                                    // Alcance do final do arquivo...
+                                                    // $msg_email .= $linha;
+                                                } else if (substr ($linha_post, 0, 7) == 'From - ') {
+                                                    // Delimitador da mensagem seguinte. Final desta mensagem...
+                                                    array_unshift ($fila_leit, $linha_post);
+                                                    break;
+                                                } else {
+                                                    // Linha em branco faz parte da mensagem atual...
+                                                    $msg_email .= $linha;
+                                                    array_unshift ($fila_leit, $linha_post);
+                                                }
+                                            } else if (substr ($linha, 0, 7) == 'From - ') {
+                                                morre ("#E022 - Erro detectando limite de mensagem na linha #" . $cntlinha . " do arquivo '" . $fpath . "'!");
+                                            } else {
+                                                $msg_email .= $linha;
+                                            }
+                                        }
+                                        $objcabec = imap_rfc822_parse_headers ($msg_email);
+                                        if (! is_object ($objcabec)) {
+                                            morre ("#E023 - Falha ao analisar cabecalhos da mensagem contida entre as linhas #" . $msg_inicio . " e #" . ($cntlinha - 1) . " do arquivo '" . $fpath . "'!");
+                                        }
+                                        if (empty ($objcabec->message_id)) {
+                                            morre ("#E024 - Falha ao identificar ID da mensagem contida entre as linhas #" . $msg_inicio . " e #" . ($cntlinha - 1) . " do arquivo '" . $fpath . "'!");
+                                        }
+                                        if (array_key_exists ($objcabec->message_id, $jabaixou)) {
+                                            $conta_repetidos++;
+                                            exibe (':');
+                                            $f2path = $jabaixou[$objcabec->message_id];
+                                            if (! compara_mensagens ($msg_email, $f2path)) {
+                                                morre ("#E025 - Verificacao de integridade falhou entre o arquivo '" . $f2path . "' e a mensagem contida entre as linhas #" . $msg_inicio . " e #" . ($cntlinha - 1) . " do arquivo '" . $fpath . "'!");
+                                            }
+                                        } else {
+                                            $nomenovo = escolhe_nome_arquivo ($msg_email, $filedir);
+                                            $caminhonovo = $filedir . '/' . $nomenovo;
+                                            $bytes = file_put_contents ($caminhonovo, $msg_email);
+                                            if ($bytes === false) {
+                                                morre ("#E026 - Impossivel gravar arquivo '" . $caminhonovo . "' com o conteudo da mensagem contida entre as linhas #" . $msg_inicio . " e #" . ($cntlinha - 1) . " do arquivo '" . $fpath . "'!");
+                                            } else if (! compara_mensagens ($msg_email, $caminhonovo, true)) {
+                                                morre ("#E027 - Falha na comparacao do conteudo do arquivo '" . $caminhonovo . "' com o conteudo da mensagem contida entre as linhas #" . $msg_inicio . " e #" . ($cntlinha - 1) . " do arquivo '" . $fpath . "'!\n\nSera disco cheio ou danificado?");
+                                            } else {
+                                                exibe ('*');
+                                                $conta_importados++;
+                                                $jabaixou[$objcabec->message_id] = $caminhonovo;
+                                            }
+                                        }
+                                    } else {
+                                        morre ("#E020 - Erro detectando cabecalho 'X-Mozilla-Status2' na linha #" . $cntlinha . " do arquivo '" . $fpath . "'!");
+                                    }
+                                } else {
+                                    morre ("#E019 - Erro detectando cabecalho 'X-Mozilla-Status' na linha #" . $cntlinha . " do arquivo '" . $fpath . "'!");
+                                }
+                            } else {
+                                morre ("#E018 - Erro detectando cabecalho 'From - ' na linha #" . $cntlinha . " do arquivo '" . $fpath . "'!");
+                            }
+                        }
                         fclose ($fd);
-                    } else {
+                        exibe ("\n +++ " . $conta_importados . " extraido + " . $conta_repetidos . " duplicado!\n");
+                    } else if ($d_entry != 'msgFilterRules.dat') { // Arquivo que deve ser ignorado...
                         $ext = strtolower (substr ($d_entry, $pos));
                         if ($ext != '.msf') {
                             morre ("#E014 - Encontrado arquivo estranho na pasta de mensagens do Thunderbird: '" . $fpath . "'!");
@@ -167,9 +273,22 @@ function main () {
     }
     
     // Remontar os arquivos MailBox e destruir os arquivos '*.msf'
+    
+}
+
+function bota_e_tira (&$matriz, &$pos, $fd) {
+    if (! feof ($fd)) {
+        $linha = fgets ($fd);
+        if ($linha !== false) {
+            $matriz[] = $linha;
+        }
+    }
+    $pos++;
+    return (array_shift ($matriz));
 }
 
 function importa_pasta ($imapconn, $imapserver, $folder) {
+    /* Apos os testes de "parse" nos arquivos do Thunderbird, remover ou comentar esta linha */ return;
     exibe ("Explorando pasta '" . $folder . "'...");
 
     $rootdir = dirname (__FILE__) . '/local-storage/' . str_replace ('.', '/', $folder);
@@ -244,15 +363,12 @@ function importa_pasta ($imapconn, $imapserver, $folder) {
                 $bytes = file_put_contents ($fpath, $todamensagem);
                 if ($bytes === false) {
                     aviso ("#A005 - Impossivel gravar arquivo '" . $fpath . "' com o conteudo da mensagem #" . $mailitem . " da pasta '" . $folder . "'!");
-                } else if (sha1 ($todamensagem) !== sha1_file ($fpath)) {
-                    aviso ("#A006 - Falha na comparacao do conteudo do arquivo '" . $fpath . "' com o conteudo da mensagem #" . $mailitem . " da pasta '" . $folder . "'!");
+                } else if (! compara_mensagens ($todamensagem, $fpath, true)) {
+                    aviso ("#A006 - Falha na comparacao do conteudo do arquivo '" . $fpath . "' com o conteudo da mensagem #" . $mailitem . " da pasta '" . $folder . "'!\n\nSera disco cheio ou danificado?");
                 } else {
                     exibe ('.');
                     $jabaixou[] = $objcabec->message_id;
                     $conta_importados++;
-                    if (! ($conta_importados % 20)) {
-                        exibe ('^');
-                    }
                     $faz_remocao = true;
                 }
             }
@@ -265,10 +381,88 @@ function importa_pasta ($imapconn, $imapserver, $folder) {
             }
         }
         
-        exibe (" " . $conta_importados . " importado + " . $conta_repetidos . " repetido!\n");
+        exibe ("\n +++ " . $conta_importados . " importado + " . $conta_repetidos . " repetido!\n");
     } else {
         exibe (" Nada para importar.\n");
     }
+}
+
+function compara_mensagens ($mensagem, $arquivo, $byteabyte = false) {
+    // Funcao que compara o conteudo de uma mensagem com o conteudo de um arquivo
+    // Se $byteabyte = true, a verificacao sera menos relaxada...
+    $sha1msg = sha1 ($mensagem);
+    $arqc = file_get_contents ($arquivo);
+    if ($arqc !== false) {
+        if (! $byteabyte) {
+            // Se ambos forem mensagens de e-mail, suprimir os cabecalhos e comparar somente o corpo
+            $pos = strpos ($mensagem, "\r\n\r\n");
+            if ($pos !== false) {
+                $objcabec = imap_rfc822_parse_headers ($mensagem);
+                if (is_object ($objcabec)) {
+                    $mensagem = trim (substr ($mensagem, $pos));
+                    $sha1msg = sha1 ($mensagem);
+                    $pos = strpos ($arqc, "\r\n\r\n");
+                    if ($pos !== false) {
+                        $objcabec2 = imap_rfc822_parse_headers ($arqc);
+                        if (is_object ($objcabec2)) {
+                            $arqc = trim (substr ($arqc, $pos));
+                            $prop_comps_str_obrig = array ('message_id', 'date');
+                            $prop_comps_str_opcion = array ('subject', 'references');
+                            $prop_comps_obj_opcion = array ('from', 'to', 'cc', 'reply_to');
+                            $prop_comps_obj_obj = array ('personal', 'adl', 'mailbox', 'host');
+                            foreach ($prop_comps_str_obrig as $p) {
+                                if (empty ($objcabec->$p) || empty ($objcabec2->$p)) {
+                                    return (false);
+                                }
+                                if ($objcabec->$p !== $objcabec2->$p) {
+                                    return (false);
+                                }
+                            }
+                            foreach ($prop_comps_str_opcion as $p) {
+                                if (! (empty ($objcabec->$p) && empty ($objcabec2->$p))) {
+                                    if (empty ($objcabec->$p) || empty ($objcabec2->$p)) {
+                                        return (false);
+                                    } else if ($objcabec->$p !== $objcabec2->$p) {
+                                        return (false);
+                                    }
+                                }
+                            }
+                            foreach ($prop_comps_obj_opcion as $p) {
+                                if (! (empty ($objcabec->$p) && empty ($objcabec2->$p))) {
+                                    foreach ($objcabec->$p as $elem) {
+                                        $perdido = true;
+                                        foreach ($objcabec2->$p as $outroelem) {
+                                            $igual = true;
+                                            foreach ($prop_comps_obj_obj as $t) {
+                                                if (! (empty ($elem->$t) && empty ($outroelem->$t))) {
+                                                    if (empty ($elem->$t) || empty ($outroelem->$t)) {
+                                                        $igual = false;
+                                                        break;
+                                                    } else if ($elem->$t !== $outroelem->$t) {
+                                                        $igual = false;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if ($igual) {
+                                                $perdido = false;
+                                                break;
+                                            }
+                                        }
+                                        if ($perdido) {
+                                            return (false);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return (sha1 ($arqc) === $sha1msg);
+    }
+    return (false);
 }
 
 function obtem_message_id ($fpath) {
