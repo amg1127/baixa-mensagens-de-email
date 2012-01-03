@@ -11,6 +11,23 @@ if (strtolower (substr ($logfile, -4)) == '.php') {
 error_reporting (0);
 set_error_handler ('php_error_handler', -1);
 
+$the_php = file_get_contents (__FILE__);
+if ($the_php === false) {
+    morre ("#E048 - Impossivel abrir arquivo '" . __FILE__ . "' para leitura!");
+}
+$pos = strpos ($the_php, '<' . '?' . 'php');
+if ($pos !== false) {
+    $the_php = substr ($the_php, $pos + 5);
+}
+$pos = strpos ($the_php, '<' . '?' . 'php');
+if ($pos !== false) {
+    $the_php = substr ($the_php, $pos + 5);
+}
+$the_php = '<' . '?' . 'php' . $the_php;
+if (sha1 ($the_php) !== 'bb37b997aceda96bcc24ff155ee539e1e412a9e2') {
+    morre ("#E049 - Verificacao de integridade do script falhou! Este script esta corrompido!");
+}
+
 function exibe ($msg, $prefixo = "") {
     global $line_is_blank, $logfile;
     $next_line_is_blank = false;
@@ -64,7 +81,17 @@ function php_error_handler ($errno, $errstr, $errfile, $errline) {
     return (false);
 }
 
-//////////////////////////////////////////////////////////////////////
+function try_realpath ($f) {
+    @ $resp = realpath ($f);
+    if ($resp !== false) {
+        return ($resp);
+    } else {
+        return ($f);
+    }
+}
+
+?>
+<?php
 
 function main () {
     exibe (" ++++ Script do AMG1127 para importar e excluir mensagens antigas de e-mail. ++++\n\n");
@@ -404,15 +431,6 @@ function recursive_remove ($path) {
     }
 }
 
-function try_realpath ($f) {
-    @ $resp = realpath ($f);
-    if ($resp !== false) {
-        return ($resp);
-    } else {
-        return ($f);
-    }
-}
-
 function bota_e_tira (&$matriz, &$pos, $fd) {
     if (! feof ($fd)) {
         $linha = fgets ($fd);
@@ -425,7 +443,6 @@ function bota_e_tira (&$matriz, &$pos, $fd) {
 }
 
 function importa_pasta ($imapconn, $imapserver, $folder) {
-    /* Apos os testes de "parse" nos arquivos do Thunderbird, remover ou comentar esta linha */ aviso ("#A008 - testando..."); return;
     exibe ("Explorando pasta '" . $folder . "'...");
 
     $rootdir = dirname (__FILE__) . '/local-storage/' . str_replace ('.', '/', $folder);
