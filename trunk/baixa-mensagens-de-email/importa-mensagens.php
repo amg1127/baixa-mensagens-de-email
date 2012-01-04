@@ -11,6 +11,7 @@ if (strtolower (substr ($logfile, -4)) == '.php') {
 error_reporting (0);
 set_error_handler ('php_error_handler', -1);
 header ('Content-Type: text/plain');
+exibe (" ++++ Script do AMG1127 para importar e excluir mensagens antigas de e-mail. ++++\n\n");
 
 $the_php = file_get_contents (__FILE__);
 if ($the_php === false) {
@@ -95,8 +96,6 @@ function try_realpath ($f) {
 <?php
 
 function main () {
-    exibe (" ++++ Script do AMG1127 para importar e excluir mensagens antigas de e-mail. ++++\n\n");
-
     // Conectar-se ao servidor de IMAP
     $usuario = prompt ("Digite o nome de usuario para conexao: ");
     $senha = prompt ("Digite a senha de usuario para conexao (CUIDADO: ELA IRA APARECER NA TELA): ");
@@ -222,9 +221,9 @@ function main () {
                             $cntlinha++;
                             if (preg_match ("/^From - (Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|Mai|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [0-3]\\d [012]\\d:[0-5]\\d:[0-5]\\d \\d\\d\\d\\d\\s*\$/", $linha)) {
                                 $linha = bota_e_tira ($fila_leit, $cntlinha, $fd);
-                                if (preg_match ("/^X-Mozilla-Status: [a-fA-F0-9]+\\s*\$/", $linha)) {
+                                if (preg_match ("/^X-Mozilla-Status: [a-fA-F0-9]{3,3}[0-7]\\s*\$/", $linha)) {
                                     $linha = bota_e_tira ($fila_leit, $cntlinha, $fd);
-                                    if (preg_match ("/^X-Mozilla-Status2: [a-fA-F0-9]+\\s*\$/", $linha)) {
+                                    if (preg_match ("/^X-Mozilla-Status2: [a-fA-F0-9]{8,8}\\s*\$/", $linha)) {
                                         $msg_inicio = $cntlinha - 2;
                                         $msg_email = "";
                                         while (1) {
@@ -385,11 +384,23 @@ function main () {
                         } else {
                             $prefixo .= "X-Mozilla-Status2: 00000000\r\n";
                         }
-                        $len_msg_email = strlen ($prefixo) + strlen ($msg_email);
-                        if (fwrite ($fd, $prefixo . $msg_email) !== $len_msg_email) {
-                            morre ("#E041 - Impossivel gravar dados no arquivo '" . try_realpath ($thunddir) . "'!");
+                        // Nao gravar mensagens sem ID no arquivo do Thunderbird...
+                        $pos = strpos ($msg_email, "\r\n\r\n");
+                        if ($pos !== false) {
+                            $cabec = substr ($msg_email, 0, $pos);
+                        } else {
+                            $cabec = $msg_email;
                         }
-                        exibe ('"');
+                        $objcabec = imap_rfc822_parse_headers ($cabec);
+                        if (is_object ($objcabec)) {
+                            if (! empty ($objcabec->message_id)) {
+                                $len_msg_email = strlen ($prefixo) + strlen ($msg_email);
+                                if (fwrite ($fd, $prefixo . $msg_email) !== $len_msg_email) {
+                                    morre ("#E041 - Impossivel gravar dados no arquivo '" . try_realpath ($thunddir) . "'!");
+                                }
+                                exibe ('"');
+                            }
+                        }
                     } else {
                         morre ("#E039 - Encontrado arquivo estranho na pasta de armazenamento principal: '" . try_realpath ($fpath) . "'!");
                     }
@@ -590,15 +601,41 @@ function compara_mensagens ($mensagem, $arquivo, $relax) {
             // Se ambos forem mensagens de e-mail, suprimir os cabecalhos e comparar somente o corpo
             $pos = strpos ($mensagem, "\r\n\r\n");
             if ($pos !== false) {
-                $objcabec = imap_rfc822_parse_headers ($mensagem);
+                $cabec = substr ($mensagem, 0, $pos);
+                // Existem mensagens com o mesmo conteudo no corpo, com uma delas codificada em 8bit e a outra em 'quoted-printable'.
+                // Comparar o corpo byte a byte nesses casos eh erro na certa. Portanto, se esse caso aparecer, decodificar o 'quoted-printable' antes...
+                $quoted_printable = (strpos ("\r\n" . $cabec . "\r\n", "\r\nContent-Transfer-Encoding: quoted-printable\r\n") !== false);
+                $objcabec = imap_rfc822_parse_headers ($cabec);
                 if (is_object ($objcabec)) {
-                    $mensagem = trim (substr ($mensagem, $pos));
+                    $mensagem = substr ($mensagem, $pos);
+                    if ($quoted_printable) {
+                        $temp = trim (imap_qprint ($mensagem));
+                        if (empty ($temp)) {
+                            $mensagem = trim ($mensagem);
+                        } else {
+                            $mensagem = $temp;
+                        }
+                    } else {
+                        $mensagem = trim ($mensagem);
+                    }
                     $sha1msg = sha1 ($mensagem);
                     $pos = strpos ($arqc, "\r\n\r\n");
                     if ($pos !== false) {
-                        $objcabec2 = imap_rfc822_parse_headers ($arqc);
+                        $cabec2 = substr ($arqc, 0, $pos);
+                        $quoted_printable = (strpos ("\r\n" . $cabec2 . "\r\n", "\r\nContent-Transfer-Encoding: quoted-printable\r\n") !== false);
+                        $objcabec2 = imap_rfc822_parse_headers ($cabec2);
                         if (is_object ($objcabec2)) {
-                            $arqc = trim (substr ($arqc, $pos));
+                            $arqc = substr ($arqc, $pos);
+                            if ($quoted_printable) {
+                                $temp = trim (imap_qprint ($arqc));
+                                if (empty ($temp)) {
+                                    $arqc = trim ($arqc);
+                                } else {
+                                    $arqc = $temp;
+                                }
+                            } else {
+                                $arqc = trim ($arqc);
+                            }
                             $prop_comps_str_obrig = array ('message_id', 'date');
                             $prop_comps_str_opcion = array ('subject', 'references');
                             $prop_comps_obj_opcion = array ('from', 'to', 'cc', 'reply_to');
