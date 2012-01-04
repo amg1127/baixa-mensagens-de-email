@@ -10,6 +10,7 @@ if (strtolower (substr ($logfile, -4)) == '.php') {
 
 error_reporting (0);
 set_error_handler ('php_error_handler', -1);
+header ('Content-Type: text/plain');
 
 $the_php = file_get_contents (__FILE__);
 if ($the_php === false) {
@@ -99,8 +100,8 @@ function main () {
     // Conectar-se ao servidor de IMAP
     $usuario = prompt ("Digite o nome de usuario para conexao: ");
     $senha = prompt ("Digite a senha de usuario para conexao (CUIDADO: ELA IRA APARECER NA TELA): ");
-    $imapserver = "{imap.servidor.com.br/readonly}";
-    $imapconn = imap_open ($imapserver . "INBOX", $usuario, $senha, OP_READONLY | OP_HALFOPEN);
+    $imapserver = "{imap.servidor.com.br}";
+    $imapconn = imap_open ($imapserver . "INBOX", $usuario, $senha, OP_HALFOPEN | CL_EXPUNGE);
     if ($imapconn === false) {
         morre ("#E001 - Impossivel abrir conexao IMAP para o servidor - " . imap_last_error ());
     }
@@ -189,10 +190,13 @@ function main () {
                                     $msgid = obtem_message_id ($f2path);
                                     if ($msgid !== false) {
                                         if (array_key_exists ($msgid, $jabaixou)) {
-                                            morre ("#E016 - Neste bloco de codigo, nao deveriam ser encontradas mensagens duplicadas!");
+                                            // Mensagem duplicada na pasta... Excluir, se puder...
+                                            verifica_e_apaga ($jabaixou[$msgid], $f2path);
+                                            exibe (';');
+                                        } else {
+                                            $jabaixou[$msgid] = $f2path;
+                                            exibe (',');
                                         }
-                                        $jabaixou[$msgid] = $f2path;
-                                        exibe (',');
                                     }
                                 }
                             }
@@ -409,7 +413,7 @@ function main () {
     if (! rename ($new_thunderbird_dir, $thunderbird_dir)) {
         morre ("#E046 - Impossivel colocar em producao a nova estrutura de pasta de mensagens arquivadas do Thunderbird!");
     }
-    
+
     exibe ("\nA operacao de importacao foi realizada com sucesso!\nVou limpar a minha sujeira; se preferir, voce pode acessar os arquivos do Thunderbird agora...\n");
     recursive_remove ($thunderbird_dir . '_old');
 }
@@ -478,11 +482,11 @@ function importa_pasta ($imapconn, $imapserver, $folder) {
     closedir ($dd);
     clearstatcache (true);
     
-    if (! imap_reopen ($imapconn, $imapserver . $folder, OP_READONLY)) {
+    if (! imap_reopen ($imapconn, $imapserver . $folder, CL_EXPUNGE)) {
         morre ("#E004 - Impossivel abrir pasta '" . $folder . "': " . imap_last_error ());
     }
     
-    $maillist = imap_search ($imapconn, "UNDELETED BEFORE \"" . date ('r', mktime (0, 0, 0, 1, 1, 2011)) . "\"", SE_UID);
+    $maillist = imap_search ($imapconn, "UNDELETED BEFORE \"" . date ('r', mktime (0, 0, 0, date('n'), date('j'), date('Y') - 1)) . "\"", SE_UID);
     if (is_array ($maillist)) {
         $conta_importados = 0;
         $conta_repetidos = 0;
@@ -549,6 +553,10 @@ function importa_pasta ($imapconn, $imapserver, $folder) {
     } else {
         exibe (" Nada para importar.\n");
     }
+    
+    // Estranhamente, as mensagens marcadas para exclusao nao estao sendo excluidas de fato, apesar da flag CL_EXPUNGE.
+    // Excluindo mensagens manualmente...
+    imap_expunge ($imapconn);
 }
 
 function verifica_e_apaga ($f_deixa, $f_apaga) {
@@ -558,6 +566,8 @@ function verifica_e_apaga ($f_deixa, $f_apaga) {
     }
     if (compara_mensagens ($arqc, $f_apaga, true)) {
         must_unlink ($f_apaga);
+    } else {
+        morre ("#E016 - Verificacao de integridade falhou entre os arquivos '" . try_realpath ($f_deixa) . "' e '" . try_realpath ($f_apaga) . "'!");
     }
 }
 
@@ -733,6 +743,9 @@ function escolhe_nome_arquivo ($mensagem, $rootdir) {
 
 //////////////////////////////////////////////////////////////////////
 
+if (php_sapi_name() != "cli") {
+    morre ("#E050 - Este script deveria ser executado em linha de comando e nao esta preparado para ser executado de outra maneira!");
+}
 main ();
 exibe ("[  Tudo OK.  ]\n");
 sai (0);
